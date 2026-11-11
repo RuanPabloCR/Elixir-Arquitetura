@@ -41,3 +41,5 @@ for %{entrada: entrada, motivo: motivo} <- invalidos do
   id = if is_map(entrada), do: Map.get(entrada, :id, "?"), else: "?"
   IO.puts("  ##{id}: #{motivo}")
 end
+
+:ok = Pedido.Dispatcher.processar(validos, 2)
