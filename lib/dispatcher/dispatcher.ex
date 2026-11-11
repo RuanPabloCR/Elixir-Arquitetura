@@ -17,7 +17,7 @@ defmodule Pedido.Dispatcher do
   @type resumo :: %{
           concluidos: non_neg_integer(),
           reprocessados: non_neg_integer(),
-          falhas: [%{pedido_id: pos_integer(), motivo: term()}]
+          falhas: [%{pedido_id: pos_integer(), motivo: String.t()}]
         }
 
   def start_link(_opts), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
@@ -115,7 +115,7 @@ defmodule Pedido.Dispatcher do
         {:noreply, state}
 
       {worker, workers} ->
-        IO.puts("[Dispatcher] Worker #{worker.id} caiu (#{inspect(reason)})")
+        IO.puts("[Dispatcher] Worker #{worker.id} caiu (#{motivo(reason)})")
 
         state = %{state | workers: workers, ociosos: :queue.filter(&(&1 != pid), state.ociosos)}
         state = if worker.atual, do: reenfileirar(state, worker.atual, reason), else: state
@@ -128,7 +128,7 @@ defmodule Pedido.Dispatcher do
   defp despachar(state) do
     with {{:value, item}, fila} <- :queue.out(state.fila),
          {{:value, pid}, ociosos} <- :queue.out(state.ociosos) do
-      Pedido.Worker.processar(pid, item.entrada)
+      Pedido.Worker.processar(pid, item.entrada, item.tentativas)
 
       despachar(%{
         state
@@ -148,7 +148,7 @@ defmodule Pedido.Dispatcher do
 
     if tentativas >= @max_tentativas do
       IO.puts("[Dispatcher] Pedido ##{id} esgotou #{@max_tentativas} tentativas: lista de falhas")
-      %{state | falhas: [%{pedido_id: id, motivo: reason} | state.falhas]}
+      %{state | falhas: [%{pedido_id: id, motivo: motivo(reason)} | state.falhas]}
     else
       IO.puts("[Dispatcher] Pedido ##{id} volta para a fila (tentativa #{tentativas} de #{@max_tentativas})")
 
@@ -159,6 +159,10 @@ defmodule Pedido.Dispatcher do
       }
     end
   end
+
+  # Excecoes chegam como {excecao, stacktrace}; mostramos so a mensagem.
+  defp motivo({%{__exception__: true} = excecao, _stacktrace}), do: Exception.message(excecao)
+  defp motivo(reason), do: inspect(reason)
 
   defp responder_se_terminou(%{esperando: []} = state), do: state
 

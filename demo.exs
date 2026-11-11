@@ -23,6 +23,23 @@ entradas = [
     frete: 15.0
   },
   %{tipo: :fisico, id: 6, cliente: "", itens: [%{produto: "Cabo", quantidade: 1, preco: 10}], frete: 5},
+  # Falha na 1a tentativa e conclui ao ser reprocessado.
+  %{
+    tipo: :digital,
+    id: 8,
+    cliente: "Fabio",
+    itens: [%{produto: "Plugin", quantidade: 1, preco: 49.9}],
+    falhas_simuladas: 1
+  },
+  # Sempre falha: esgota as 3 tentativas e vai para a lista de falhas.
+  %{
+    tipo: :fisico,
+    id: 9,
+    cliente: "Gabi",
+    itens: [%{produto: "Monitor", quantidade: 1, preco: 900.0}],
+    frete: 30.0,
+    falhas_simuladas: 3
+  },
   %{tipo: :misterioso, id: 7},
   "isto nao e um pedido"
 ]
@@ -42,10 +59,16 @@ for %{entrada: entrada, motivo: motivo} <- invalidos do
   IO.puts("  ##{id}: #{motivo}")
 end
 
-# Lote maior para os workers terem o que fazer: repete os validos com ids novos.
+# Lote maior para os workers terem o que fazer: a 1a rodada mantem as falhas
+# simuladas; as copias seguintes (ids novos) nao falham.
 lote =
-  for rodada <- 0..4, item <- validos do
-    %{item | pedido: %{item.pedido | id: item.pedido.id + rodada * 100}}
+  for rodada <- 0..2, item <- validos do
+    pedido =
+      if rodada == 0,
+        do: item.pedido,
+        else: %{item.pedido | id: item.pedido.id + rodada * 100, falhas_simuladas: 0}
+
+    %{item | pedido: pedido}
   end
 
 IO.puts("\n== Despachando #{length(lote)} pedidos (workers: #{inspect(Pedido.WorkerSupervisor.ids())}) ==")

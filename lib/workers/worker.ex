@@ -20,8 +20,14 @@ defmodule Pedido.Worker do
   @spec via(id()) :: {:via, Registry, {atom(), {:worker, id()}}}
   def via(id), do: {:via, Registry, {Pedido.Registry, {:worker, id}}}
 
-  @spec processar(pid(), pedido_processado()) :: :ok
-  def processar(pid, entrada), do: GenServer.cast(pid, {:processar, entrada})
+  @doc """
+  Envia um pedido ao worker. `tentativa` e quantas vezes esse pedido ja falhou
+  (0 na primeira vez).
+  """
+  @spec processar(pid(), pedido_processado(), non_neg_integer()) :: :ok
+  def processar(pid, entrada, tentativa \\ 0) do
+    GenServer.cast(pid, {:processar, entrada, tentativa})
+  end
 
   @doc "PID atual do worker `id`, que muda a cada reinicio."
   @spec pid(id()) :: {:ok, pid()} | :error
@@ -48,8 +54,17 @@ defmodule Pedido.Worker do
   end
 
   @impl true
-  def handle_cast({:processar, %{pedido: pedido, total: total}}, state) do
+  def handle_cast({:processar, %{pedido: pedido, total: total}, tentativa}, state) do
     IO.puts("[Worker #{state.id}] Processando pedido ##{pedido.id} para #{pedido.cliente}: R$ #{total}")
+
+    # Let it crash: a falha nao e tratada aqui, o supervisor reinicia o worker.
+    if tentativa < pedido.falhas_simuladas do
+      raise Pedido.FalhaSimulada,
+        pedido_id: pedido.id,
+        tentativa: tentativa,
+        falhas_simuladas: pedido.falhas_simuladas
+    end
+
     Process.sleep(@tempo_processamento)
     GenServer.cast(Pedido.Dispatcher, {:pedido_concluido, pedido.id, self()})
     {:noreply, state}
