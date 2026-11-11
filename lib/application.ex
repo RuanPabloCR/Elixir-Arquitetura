@@ -17,8 +17,10 @@ defmodule Pedidos.Application do
 
     children = [
       {Registry, keys: :unique, name: Pedido.Registry},
+      Pedido.Resultados,
       Pedido.Dispatcher,
       Pedido.WorkerSupervisor,
+      Pedido.Terminal,
       Supervisor.child_spec({Task, fn -> Pedido.WorkerSupervisor.iniciar(quantidade) end},
         id: :workers_iniciais,
         restart: :transient

@@ -54,8 +54,8 @@ defmodule Pedido.Worker do
   end
 
   @impl true
-  def handle_cast({:processar, %{pedido: pedido, total: total}, tentativa}, state) do
-    IO.puts("[Worker #{state.id}] Processando pedido ##{pedido.id} para #{pedido.cliente}: R$ #{total}")
+  def handle_cast({:processar, %{pedido: pedido}, tentativa}, state) do
+    GenServer.cast(Pedido.Dispatcher, {:pedido_iniciado, pedido.id, self()})
 
     # Let it crash: a falha nao e tratada aqui, o supervisor reinicia o worker.
     if tentativa < pedido.falhas_simuladas do
