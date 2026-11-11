@@ -17,14 +17,16 @@ defmodule Pedido.Dispatcher do
   @type resumo :: %{
           concluidos: non_neg_integer(),
           reprocessados: non_neg_integer(),
-          falhas: [%{pedido_id: pos_integer(), motivo: String.t()}]
+          falhas: [%{pedido_id: pos_integer(), motivo: String.t()}],
+          metricas: Pedido.Resultados.metricas()
         }
 
   def start_link(_opts), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
   @doc "Coloca pedidos validos (saida do pipeline) na fila."
   @spec submeter([Pedido.Worker.pedido_processado()]) :: :ok
-  def submeter(pedidos) when is_list(pedidos), do: GenServer.cast(__MODULE__, {:submeter, pedidos})
+  def submeter(pedidos) when is_list(pedidos),
+    do: GenServer.cast(__MODULE__, {:submeter, pedidos})
 
   @doc "Bloqueia ate a fila esvaziar e nenhum worker estar ocupado."
   @spec aguardar(timeout()) :: {:ok, resumo()}
@@ -41,9 +43,6 @@ defmodule Pedido.Dispatcher do
        ociosos: :queue.new(),
        # pid => %{id: id_do_worker, atual: nil | %{entrada: ..., tentativas: n}}
        workers: %{},
-       concluidos: 0,
-       reprocessados: 0,
-       falhas: [],
        esperando: []
      }}
   end
@@ -51,7 +50,7 @@ defmodule Pedido.Dispatcher do
   @impl true
   def handle_cast({:worker_pronto, pid, id}, state) do
     Process.monitor(pid)
-    IO.puts("[Dispatcher] Worker #{id} pronto (#{inspect(pid)})")
+    :ok = Pedido.Resultados.publicar(:worker_pronto, %{worker_id: id, pid: pid})
 
     state = %{
       state
@@ -60,6 +59,18 @@ defmodule Pedido.Dispatcher do
     }
 
     {:noreply, state |> despachar() |> responder_se_terminou()}
+  end
+
+  def handle_cast({:pedido_iniciado, id, pid}, state) do
+    case state.workers do
+      %{^pid => %{id: worker_id, atual: %{entrada: %{pedido: %{id: ^id}}}}} ->
+        Pedido.Resultados.publicar(:pedido_iniciado, %{pedido_id: id, worker_id: worker_id})
+
+      _ ->
+        :ok
+    end
+
+    {:noreply, state}
   end
 
   def handle_cast({:submeter, pedidos}, state) do
@@ -74,13 +85,13 @@ defmodule Pedido.Dispatcher do
   def handle_cast({:pedido_concluido, id, pid}, state) do
     case state.workers do
       %{^pid => %{atual: %{entrada: %{pedido: %{id: ^id}}}} = worker} ->
-        IO.puts("[Dispatcher] Pedido ##{id} confirmado pelo worker #{worker.id}")
+        :ok =
+          Pedido.Resultados.publicar(:pedido_concluido, %{pedido_id: id, worker_id: worker.id})
 
         state = %{
           state
           | workers: Map.put(state.workers, pid, %{worker | atual: nil}),
-            ociosos: :queue.in(pid, state.ociosos),
-            concluidos: state.concluidos + 1
+            ociosos: :queue.in(pid, state.ociosos)
         }
 
         {:noreply, state |> despachar() |> responder_se_terminou()}
@@ -101,7 +112,7 @@ defmodule Pedido.Dispatcher do
       |> resumo()
       |> Map.merge(%{
         na_fila: :queue.len(state.fila),
-        workers: map_size(state.workers),
+        workers_ativos: map_size(state.workers),
         ocupados: Enum.count(state.workers, fn {_pid, w} -> w.atual != nil end)
       })
 
@@ -115,7 +126,12 @@ defmodule Pedido.Dispatcher do
         {:noreply, state}
 
       {worker, workers} ->
-        IO.puts("[Dispatcher] Worker #{worker.id} caiu (#{motivo(reason)})")
+        :ok =
+          Pedido.Resultados.publicar(:worker_falhou, %{
+            worker_id: worker.id,
+            pid: pid,
+            motivo: motivo(reason)
+          })
 
         state = %{state | workers: workers, ociosos: :queue.filter(&(&1 != pid), state.ociosos)}
         state = if worker.atual, do: reenfileirar(state, worker.atual, reason), else: state
@@ -147,15 +163,14 @@ defmodule Pedido.Dispatcher do
     tentativas = if reason == :shutdown, do: item.tentativas, else: item.tentativas + 1
 
     if tentativas >= @max_tentativas do
-      IO.puts("[Dispatcher] Pedido ##{id} esgotou #{@max_tentativas} tentativas: lista de falhas")
-      %{state | falhas: [%{pedido_id: id, motivo: motivo(reason)} | state.falhas]}
+      Pedido.Resultados.publicar(:pedido_falhou, %{pedido_id: id, motivo: motivo(reason)})
+      state
     else
-      IO.puts("[Dispatcher] Pedido ##{id} volta para a fila (tentativa #{tentativas} de #{@max_tentativas})")
+      Pedido.Resultados.publicar(:pedido_reprocessado, %{pedido_id: id, tentativas: tentativas})
 
       %{
         state
-        | fila: :queue.in_r(%{item | tentativas: tentativas}, state.fila),
-          reprocessados: state.reprocessados + 1
+        | fila: :queue.in_r(%{item | tentativas: tentativas}, state.fila)
       }
     end
   end
@@ -180,11 +195,14 @@ defmodule Pedido.Dispatcher do
     :queue.is_empty(state.fila) and Enum.all?(state.workers, fn {_pid, w} -> w.atual == nil end)
   end
 
-  defp resumo(state) do
+  defp resumo(_state) do
+    resultados = Pedido.Resultados.estado()
+
     %{
-      concluidos: state.concluidos,
-      reprocessados: state.reprocessados,
-      falhas: Enum.reverse(state.falhas)
+      concluidos: resultados.metricas.processados,
+      reprocessados: resultados.metricas.reprocessados,
+      falhas: resultados.pedidos_falhos,
+      metricas: resultados.metricas
     }
   end
 end

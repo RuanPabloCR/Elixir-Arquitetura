@@ -46,23 +46,29 @@ entradas = [
 
 %{validos: validos, invalidos: invalidos} = Pedido.Pipeline.processar(entradas)
 
+rodadas = 3
+
+IO.puts("""
+== Fluxo da demonstracao ==
+Somente os #{length(validos)} pedidos validos entram no despacho.
+Como sao feitas #{rodadas} rodadas, o lote tera #{length(validos) * rodadas} pedidos.
+Os #{length(invalidos)} pedidos invalidos sao contabilizados, mas nao sao enviados aos workers.
+""")
+:ok = Pedido.Terminal.habilitar_saida()
+
 IO.puts("== Validos (#{length(validos)}) ==")
 
 for %{pedido: pedido, total: total} <- validos do
   IO.puts("  ##{pedido.id} #{inspect(pedido.__struct__)} - #{pedido.cliente}: R$ #{total}")
 end
 
+:ok = Pedido.Resultados.registrar_invalidos(invalidos)
 IO.puts("\n== Invalidos (#{length(invalidos)}) ==")
-
-for %{entrada: entrada, motivo: motivo} <- invalidos do
-  id = if is_map(entrada), do: Map.get(entrada, :id, "?"), else: "?"
-  IO.puts("  ##{id}: #{motivo}")
-end
 
 # Lote maior para os workers terem o que fazer: a 1a rodada mantem as falhas
 # simuladas; as copias seguintes (ids novos) nao falham.
 lote =
-  for rodada <- 0..2, item <- validos do
+  for rodada <- 0..(rodadas - 1), item <- validos do
     pedido =
       if rodada == 0,
         do: item.pedido,

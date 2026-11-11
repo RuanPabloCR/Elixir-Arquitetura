@@ -10,7 +10,7 @@ A proposta é desenvolver um sistema de processamento de pedidos capaz de recebe
 
 Além de demonstrar o funcionamento da linguagem, o projeto busca evidenciar como Elixir e seu ecossistema, baseado na máquina virtual BEAM e no OTP, abordam problemas de concorrência, isolamento de falhas e recuperação de processos.
 
-**Status:** Implementação iniciada. A etapa atual cobre apenas a **representação e a validação de pedidos** (veja [Escopo da etapa atual](#escopo-da-etapa-atual)). Concorrência, supervisão e interface visual ficam para as próximas etapas.
+**Status:** A etapa atual cobre representação, validação, workers concorrentes, supervisão, reprocessamento e métricas. A interface visual permanece para uma próxima etapa.
 
 ## Objetivos
 
@@ -24,7 +24,7 @@ Além de demonstrar o funcionamento da linguagem, o projeto busca evidenciar com
 
 ## Escopo da etapa atual
 
-Nesta etapa, o trabalho se limita a **implementar, representar e validar pedidos**. Nenhum processo, worker ou supervisor é criado ainda: tudo é feito com funções puras, o que permite testar a lógica isoladamente antes de distribuí-la.
+Nesta etapa, o sistema valida pedidos, distribui os válidos entre workers supervisionados e registra resultados e eventos. A interface visual ainda não faz parte do projeto; o processo de resultados já oferece métricas e eventos para ela consumir futuramente.
 
 ### O que será entregue
 
@@ -32,12 +32,12 @@ Nesta etapa, o trabalho se limita a **implementar, representar e validar pedidos
 2. **Polimorfismo:** um `Protocol` que calcula o total do pedido conforme o seu tipo.
 3. **Validação:** funções que verificam um pedido e retornam `{:ok, pedido}` ou `{:error, motivo}`.
 4. **Pipeline funcional:** recebe uma coleção de pedidos e a separa em válidos e inválidos.
+5. **Concorrência e recuperação:** workers supervisionados processam os pedidos; falhas podem causar reprocessamento até o limite configurado.
+6. **Resultados e eventos:** um processo mantém métricas, estado dos workers e eventos recentes, compartilhados com consumidores como o terminal e uma futura interface.
 
 ### Fora do escopo desta etapa
 
 - Testes automatizados: por se tratar de um projeto de apresentação, o escopo foi reduzido e a verificação é feita executando o programa de demonstração.
-- Workers, Dispatcher, Supervisor e qualquer processamento concorrente.
-- Reprocessamento, tentativas e métricas de execução.
 - Interface visual.
 
 ### Representação dos pedidos
@@ -63,9 +63,9 @@ defprotocol Pedido.Total do
 end
 ```
 
-O campo `falhas_simuladas` existe para as etapas futuras de demonstração e define em quantas tentativas o worker deve falhar. Nesta etapa ele só é **representado e validado**; não tem efeito sobre o processamento.
+O campo `falhas_simuladas` define quantas falhas o worker deve produzir antes de concluir o pedido. O limite de reprocessamentos é três; se o pedido continuar falhando, ele é registrado na lista de falhas.
 
-| Valor | Comportamento esperado (etapas futuras) |
+| Valor | Comportamento |
 |---|---|
 | `0` | Pedido processado normalmente |
 | `1` | Falha na primeira tentativa e é concluído ao ser reprocessado |
@@ -82,7 +82,7 @@ Um pedido é considerado inválido quando:
 - `frete` é negativo (pedido físico).
 - `falhas_simuladas` não é um inteiro maior ou igual a zero.
 
-A validação segue a convenção do Elixir para erros esperados: retorna `{:error, motivo}` e **não** lança exceção. Isso mantém a distinção entre pedido inválido (dado ruim, tratado no pipeline) e falha inesperada (crash, tratado pelo OTP nas etapas futuras).
+A validação segue a convenção do Elixir para erros esperados: retorna `{:error, motivo}` e **não** lança exceção. Isso mantém a distinção entre pedido inválido (dado ruim, tratado no pipeline) e falha inesperada (crash, detectado pelo Dispatcher e recuperado pelo supervisor).
 
 ### Conceitos explorados nesta etapa
 
@@ -92,6 +92,8 @@ A validação segue a convenção do Elixir para erros esperados: retorna `{:err
 - Imutabilidade e composição de funções com o pipe operator (`|>`).
 - Funções de ordem superior (`Enum.map`, `Enum.reduce`, `Enum.split_with`).
 - Retorno `{:ok, _}` / `{:error, _}` com `with`.
+- Processos OTP com `GenServer`, `DynamicSupervisor` e `Registry`.
+- Eventos assíncronos e métricas mantidas por um processo dedicado.
 
 ## Funcionalidades planejadas
 
@@ -103,25 +105,29 @@ Recebimento de uma coleção de pedidos, seguida por etapas de validação, filt
 
 Representação dos pedidos com structs e cálculo do total conforme o tipo, usando `Protocol`.
 
-### 3. Processamento concorrente
+### 3. Processamento concorrente *(etapa atual)*
 
 Distribuição dos pedidos entre múltiplos workers, permitindo que diferentes tarefas sejam executadas simultaneamente.
 
 Conceitos explorados: processos leves da BEAM, passagem de mensagens, concorrência e paralelismo, isolamento entre processos.
 
-### 4. Supervisão e tolerância a falhas
+### 4. Supervisão e tolerância a falhas *(etapa atual)*
 
 Monitoramento dos workers, recuperação automática dos processos que falharem e reprocessamento dos pedidos interrompidos.
 
 Conceitos explorados: OTP, `GenServer` e `Supervisor`, árvore de supervisão, estratégias de reinicialização, `Process.monitor`, filosofia *Let It Crash*.
 
-### 5. Visualização da execução
+### 5. Resultados, métricas e eventos *(etapa atual)*
+
+`Pedido.Resultados` mantém contadores, estado dos workers e os 2.000 eventos mais recentes. Consumidores assinam eventos ou consultam um snapshot; o terminal já apresenta os mesmos eventos que poderão alimentar a interface.
+
+### 6. Visualização da execução
 
 Uma interface para acompanhar o sistema em funcionamento: workers ativos, pedidos em andamento, e controles para ajustar a quantidade de workers e simular falhas. Veja [Visualização](#visualização-decisão-em-aberto).
 
 ## Arquitetura proposta
 
-A arquitetura é conceitual e poderá ser modificada durante a implementação. A etapa atual implementa apenas o bloco de validação e transformação.
+A arquitetura é conceitual e poderá ser modificada durante a implementação. A implementação atual inclui validação, despacho, supervisão, recuperação e resultados.
 
 ### Fluxo dos pedidos
 
@@ -193,10 +199,10 @@ Esses valores ainda serão ajustados na prática. O limite de 1 milhão de proce
 
 **Pontos de atenção:**
 
-- O Dispatcher atual escolhe o worker com `Enum.at(workers, i)`, que percorre a lista a cada pedido. Com muitos workers isso fica quadrático e precisa mudar (por exemplo, usar uma tupla ou escolher o próximo worker livre).
-- O `DynamicSupervisor` aceita por padrão 3 reinícios em 5 segundos e depois cai. Derrubar vários workers em sequência na demonstração exige aumentar o `max_restarts`.
+- O Dispatcher entrega pedidos aos workers ociosos por uma fila; assim, não percorre a lista de workers a cada pedido.
+- O `DynamicSupervisor` está configurado com até 100 reinícios em 5 segundos para permitir a demonstração de falhas em sequência.
 - O limite de processos da BEAM é configurável (`+P`) e hoje está em cerca de 1 milhão.
-- Os `IO.puts` dos workers precisam ser substituídos por eventos ou contadores. Com 100 mil workers, imprimir cada um inviabiliza a demonstração e a visualização.
+- O terminal apresenta os eventos recebidos por `Pedido.Resultados`. Em execuções de escala, a saída deve ser filtrada para não imprimir cada evento individualmente.
 
 ## Tratamento de erros
 
@@ -206,8 +212,6 @@ Esses valores ainda serão ajustados na prática. O limite de 1 milhão de proce
 | Falha inesperada | Exceção durante o processamento em um worker | Crash do worker e recuperação pelo OTP |
 
 ## Estratégia de recuperação
-
-*Planejada para as etapas de concorrência e supervisão.*
 
 1. O Dispatcher registra quais pedidos estão em andamento em cada worker.
 2. Cada worker se registra ao iniciar, pois seu PID muda após um reinício.
@@ -223,27 +227,26 @@ A fila e os resultados ficam em memória. A supervisão restaura o serviço, mas
 
 ## Métricas
 
-Planejadas para as etapas posteriores. Ao final da execução, o sistema deverá exibir:
+As métricas são mantidas por `Pedido.Resultados` e incluídas no resumo ao final da execução. `processados` conta conclusões bem-sucedidas; `falhas` conta pedidos que esgotaram as tentativas:
 
 - Pedidos processados.
 - Pedidos inválidos.
 - Pedidos reprocessados.
 - Pedidos enviados à lista de falhas.
 - Reinícios de workers.
-- Tempo total de execução.
 
 ## Visualização (decisão em aberto)
 
-Queremos um pequeno frontend para visualizar o programa em execução: a quantidade de workers, o estado de cada pedido e a simulação de falhas (por exemplo, um botão que derruba um worker). Ainda não decidimos se o projeto será **Elixir puro** ou se terá uma camada web. As opções consideradas:
+Queremos um pequeno frontend somente visual para a demonstração: acompanhar workers, pedidos, eventos e métricas. A lógica de processamento continua no núcleo Elixir; a tela consulta o estado e assina os eventos de `Pedido.Resultados`, sem implementar regras de negócio.
 
 | Opção | Linguagem | Prós | Contras |
 |---|---|---|---|
-| **Phoenix LiveView** | Elixir (sem JavaScript escrito por nós) | Continua 100% Elixir; os processos publicam eventos via `Phoenix.PubSub` e a tela atualiza em tempo real; botões chamam funções do sistema diretamente | Adiciona a dependência do Phoenix e mais conceitos para explicar |
+| **Phoenix LiveView** | Elixir (sem JavaScript escrito por nós) | Continua 100% Elixir; a tela acompanha eventos e estado em tempo real | Adiciona a dependência do Phoenix e mais conceitos para explicar |
 | **Plug + Cowboy com SSE/WebSocket e página HTML estática** | Elixir + HTML/JS simples | Dependências mínimas; o servidor continua em Elixir | A página precisa de algum JavaScript; mais código manual |
 | **Dashboard no terminal** (`IO.ANSI` ou biblioteca TUI) | Elixir puro | Sem dependências web | Menos atrativo para a apresentação |
 | **`:observer.start()`** | Ferramenta da própria BEAM | Já mostra a árvore de supervisão e os PIDs, sem código | Não permite controlar a simulação |
 
-**Inclinação atual:** manter o núcleo (pedidos, workers, supervisão) em Elixir puro e independente da interface, e adicionar o **Phoenix LiveView** depois como camada de visualização. Assim a lógica não depende do frontend, e o `:observer` serve de reserva para a demonstração.
+**Inclinação atual:** manter o núcleo (pedidos, workers, supervisão e resultados) em Elixir puro e independente da interface, e adicionar o **Phoenix LiveView** depois como camada de visualização. Assim a lógica não depende do frontend, e o `:observer` serve de reserva para a demonstração.
 
 Esta decisão **não bloqueia a etapa atual**, que não possui interface.
 
@@ -283,10 +286,10 @@ A estrutura abaixo é uma previsão inicial e será ajustada conforme a implemen
 ```text
 .
 ├── lib/
-│   ├── orders/          # (atual) Structs, protocolo, validação e pipeline
-│   ├── workers/         # Workers e seu supervisor
+│   ├── orders/          # Structs, protocolo, validação e pipeline
+│   ├── workers/         # Workers, falhas simuladas e DynamicSupervisor
 │   ├── dispatcher/      # Distribuição, monitoramento e reprocessamento
-│   ├── results/         # Resultados e métricas
+│   ├── results/         # Métricas, estado e eventos compartilhados
 │   └── application.ex   # Inicialização da árvore de supervisão
 ├── mix.exs              # Configuração do projeto
 └── README.md
@@ -296,7 +299,7 @@ A estrutura abaixo é uma previsão inicial e será ajustada conforme a implemen
 
 ## Roadmap
 
-### Etapa atual — representação e validação de pedidos
+### Etapa atual — processamento concorrente e resultados
 
 - [x] Criar o projeto com `mix new` e migrar a estrutura inicial.
 - [x] Definir as structs `PedidoFisico` e `PedidoDigital`, com `@type`.
@@ -304,15 +307,13 @@ A estrutura abaixo é uma previsão inicial e será ajustada conforme a implemen
 - [x] Implementar a validação (`{:ok, pedido}` / `{:error, motivo}`).
 - [x] Construir o pipeline que separa pedidos válidos e inválidos.
 - [x] Criar um script de demonstração com pedidos válidos e inválidos.
+- [x] Implementar workers concorrentes e supervisão dinâmica.
+- [x] Integrar o Dispatcher, monitoramento e reprocessamento.
+- [x] Manter métricas e eventos no processo de resultados.
+- [x] Usar os eventos compartilhados como saída do terminal.
 
 ### Próximas etapas
 
-- [ ] Implementar os workers concorrentes.
-- [ ] Implementar o processo de resultados e métricas.
-- [ ] Integrar o Dispatcher.
-- [ ] Implementar a árvore de supervisão com OTP.
-- [ ] Implementar o monitoramento e o reprocessamento de pedidos.
-- [ ] Simular falhas e validar a recuperação dos processos.
 - [ ] Decidir e implementar a visualização (Elixir puro ou LiveView).
 - [ ] Preparar e ensaiar a demonstração prática.
 
