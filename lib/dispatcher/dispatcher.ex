@@ -43,7 +43,9 @@ defmodule Pedido.Dispatcher do
        ociosos: :queue.new(),
        # pid => %{id: id_do_worker, atual: nil | %{entrada: ..., tentativas: n}}
        workers: %{},
-       esperando: []
+       esperando: [],
+       # Inicio (tempo monotonico, ms) do lote em andamento; nil quando ocioso.
+       lote_inicio: nil
      }}
   end
 
@@ -58,7 +60,7 @@ defmodule Pedido.Dispatcher do
         ociosos: :queue.in(pid, state.ociosos)
     }
 
-    {:noreply, state |> despachar() |> responder_se_terminou()}
+    {:noreply, state |> despachar() |> verificar_conclusao()}
   end
 
   def handle_cast({:pedido_iniciado, id, pid}, state) do
@@ -79,7 +81,9 @@ defmodule Pedido.Dispatcher do
         :queue.in(%{entrada: entrada, tentativas: 0}, fila)
       end)
 
-    {:noreply, %{state | fila: fila} |> despachar() |> responder_se_terminou()}
+    state = if pedidos != [], do: iniciar_lote(state, length(pedidos)), else: state
+
+    {:noreply, %{state | fila: fila} |> despachar() |> verificar_conclusao()}
   end
 
   def handle_cast({:pedido_concluido, id, pid}, state) do
@@ -94,7 +98,7 @@ defmodule Pedido.Dispatcher do
             ociosos: :queue.in(pid, state.ociosos)
         }
 
-        {:noreply, state |> despachar() |> responder_se_terminou()}
+        {:noreply, state |> despachar() |> verificar_conclusao()}
 
       _ ->
         {:noreply, state}
@@ -103,7 +107,7 @@ defmodule Pedido.Dispatcher do
 
   @impl true
   def handle_call(:aguardar, from, state) do
-    {:noreply, responder_se_terminou(%{state | esperando: [from | state.esperando]})}
+    {:noreply, verificar_conclusao(%{state | esperando: [from | state.esperando]})}
   end
 
   def handle_call(:estado, _from, state) do
@@ -126,17 +130,21 @@ defmodule Pedido.Dispatcher do
         {:noreply, state}
 
       {worker, workers} ->
-        :ok =
+        # :shutdown vem de remover_worker/0: e uma remocao, nao uma falha.
+        if reason == :shutdown do
+          Pedido.Resultados.publicar(:worker_removido, %{worker_id: worker.id, pid: pid})
+        else
           Pedido.Resultados.publicar(:worker_falhou, %{
             worker_id: worker.id,
             pid: pid,
             motivo: motivo(reason)
           })
+        end
 
         state = %{state | workers: workers, ociosos: :queue.filter(&(&1 != pid), state.ociosos)}
         state = if worker.atual, do: reenfileirar(state, worker.atual, reason), else: state
 
-        {:noreply, state |> despachar() |> responder_se_terminou()}
+        {:noreply, state |> despachar() |> verificar_conclusao()}
     end
   end
 
@@ -179,16 +187,37 @@ defmodule Pedido.Dispatcher do
   defp motivo({%{__exception__: true} = excecao, _stacktrace}), do: Exception.message(excecao)
   defp motivo(reason), do: inspect(reason)
 
-  defp responder_se_terminou(%{esperando: []} = state), do: state
+  # Pedidos submetidos enquanto um lote esta em andamento entram nesse mesmo lote.
+  defp iniciar_lote(%{lote_inicio: nil} = state, quantidade) do
+    Pedido.Resultados.publicar(:lote_iniciado, %{pedidos: quantidade})
+    %{state | lote_inicio: System.monotonic_time(:millisecond)}
+  end
 
-  defp responder_se_terminou(state) do
+  defp iniciar_lote(state, _quantidade), do: state
+
+  # Chamada apos cada mudanca de estado: fecha o lote e responde a quem aguarda.
+  defp verificar_conclusao(state) do
     if terminou?(state) do
-      resumo = resumo(state)
-      Enum.each(state.esperando, &GenServer.reply(&1, {:ok, resumo}))
-      %{state | esperando: []}
+      state |> encerrar_lote() |> responder_esperando()
     else
       state
     end
+  end
+
+  defp encerrar_lote(%{lote_inicio: nil} = state), do: state
+
+  defp encerrar_lote(state) do
+    duracao = System.monotonic_time(:millisecond) - state.lote_inicio
+    Pedido.Resultados.publicar(:lote_concluido, %{duracao_ms: duracao})
+    %{state | lote_inicio: nil}
+  end
+
+  defp responder_esperando(%{esperando: []} = state), do: state
+
+  defp responder_esperando(state) do
+    resumo = resumo(state)
+    Enum.each(state.esperando, &GenServer.reply(&1, {:ok, resumo}))
+    %{state | esperando: []}
   end
 
   defp terminou?(state) do

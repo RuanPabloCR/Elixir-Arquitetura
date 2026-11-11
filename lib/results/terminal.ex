@@ -1,19 +1,36 @@
 defmodule Pedido.Terminal do
-  @moduledoc "Consome os eventos do sistema e os apresenta no terminal."
+  @moduledoc """
+  Consome os eventos do sistema e os apresenta no terminal.
+
+  Ate `habilitar_saida/0` ser chamada, os eventos ficam pendentes (no maximo
+  `@max_pendentes`). A escolha fica no ambiente da aplicacao, e nao no estado do
+  processo, para sobreviver a um reinicio: se o Dispatcher cair, o
+  `:rest_for_one` tambem reinicia o Terminal, que deve continuar exibindo.
+  """
 
   use GenServer
+
+  @max_pendentes 500
 
   def start_link(opts \\ []),
     do: GenServer.start_link(__MODULE__, :ok, Keyword.put(opts, :name, __MODULE__))
 
   @doc "Libera a exibicao dos eventos que chegaram desde a inicializacao da aplicacao."
   @spec habilitar_saida() :: :ok
-  def habilitar_saida, do: GenServer.call(__MODULE__, :habilitar_saida)
+  def habilitar_saida do
+    Application.put_env(:pedidos, :saida_terminal, true)
+    GenServer.call(__MODULE__, :habilitar_saida)
+  end
 
   @impl true
   def init(:ok) do
     {:ok, _snapshot} = Pedido.Resultados.assinar(self())
-    {:ok, %{habilitado?: false, pendentes: :queue.new()}}
+
+    {:ok,
+     %{
+       habilitado?: Application.get_env(:pedidos, :saida_terminal, false),
+       pendentes: :queue.new()
+     }}
   end
 
   @impl true
@@ -25,7 +42,14 @@ defmodule Pedido.Terminal do
 
   @impl true
   def handle_info({:pedido_evento, evento}, %{habilitado?: false} = state) do
-    {:noreply, %{state | pendentes: :queue.in(evento, state.pendentes)}}
+    pendentes = :queue.in(evento, state.pendentes)
+
+    pendentes =
+      if :queue.len(pendentes) > @max_pendentes,
+        do: elem(:queue.out(pendentes), 1),
+        else: pendentes
+
+    {:noreply, %{state | pendentes: pendentes}}
   end
 
   def handle_info({:pedido_evento, evento}, state) do
@@ -64,4 +88,18 @@ defmodule Pedido.Terminal do
   defp formatar(%{tipo: :pedido_invalido, dados: dados}) do
     "[Evento] Pedido invalido #{inspect(dados.pedido_id)}: #{dados.motivo}"
   end
+
+  defp formatar(%{tipo: :worker_removido, dados: dados}) do
+    "[Evento] Worker #{dados.worker_id} removido"
+  end
+
+  defp formatar(%{tipo: :lote_iniciado, dados: dados}) do
+    "[Evento] Lote iniciado com #{dados.pedidos} pedidos"
+  end
+
+  defp formatar(%{tipo: :lote_concluido, dados: dados}) do
+    "[Evento] Lote concluido em #{dados.duracao_ms} ms"
+  end
+
+  defp formatar(%{tipo: tipo, dados: dados}), do: "[Evento] #{tipo}: #{inspect(dados)}"
 end

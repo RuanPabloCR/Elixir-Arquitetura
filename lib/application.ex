@@ -21,10 +21,8 @@ defmodule Pedidos.Application do
       Pedido.Dispatcher,
       Pedido.WorkerSupervisor,
       Pedido.Terminal,
-      Supervisor.child_spec({Task, fn -> Pedido.WorkerSupervisor.iniciar(quantidade) end},
-        id: :workers_iniciais,
-        restart: :transient
-      )
+      # Sincrono: quando a aplicacao termina de subir, os workers ja existem.
+      Pedido.WorkerSupervisor.workers_iniciais(quantidade)
     ]
 
     Supervisor.start_link(children, strategy: :rest_for_one, name: Pedidos.Supervisor)

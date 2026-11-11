@@ -160,25 +160,27 @@ O Supervisor não participa do fluxo de dados: ele inicia, observa e reinicia pr
 ```text
 Application
 └── Supervisor raiz (:rest_for_one)
-    ├── Resultados
+    ├── Registry            (nome -> PID atual de cada worker)
+    ├── Resultados          (métricas e eventos)
     ├── Dispatcher
-    └── DynamicSupervisor dos workers (:one_for_one)
-        ├── Worker 1
-        ├── Worker 2
-        ├── ...
-        └── Worker N   (N configurável, de dezenas a 100 mil)
+    ├── DynamicSupervisor dos workers (:one_for_one)
+    │   ├── Worker 1
+    │   ├── ...
+    │   └── Worker N        (5 por padrão; ajustável em tempo de execução)
+    ├── Terminal            (imprime os eventos)
+    └── workers_iniciais    (inicia os N workers na subida e não fica vivo)
 ```
 
 - Se um worker falhar, somente ele será reiniciado.
-- Se o Dispatcher falhar, ele e os workers serão reiniciados, preservando os Resultados.
+- Se o Dispatcher falhar, ele, os workers e o Terminal serão reiniciados, preservando os Resultados. Os workers iniciais são recriados e se anunciam ao novo Dispatcher.
 - Os processos mais simples e estáveis ficam no início da árvore.
-- Os workers ficam sob um `DynamicSupervisor`, e não sob um `Supervisor` com filhos fixos: a quantidade `N` é definida em tempo de execução e pode ser alterada durante a demonstração.
+- Os workers ficam sob um `DynamicSupervisor`, e não sob um `Supervisor` com filhos fixos: a quantidade `N` é definida em tempo de execução (`Pedido.WorkerSupervisor.definir_quantidade/1`) e pode ser alterada durante a demonstração.
 
 ### Escala dos workers
 
-Três workers não diferenciam o Elixir de linguagens mainstream, que também lidam bem com 3 threads. O que o projeto quer mostrar é que, na BEAM, um worker é um **processo leve**, e por isso o sistema pode ter milhares deles.
+Na BEAM, um worker é um **processo leve**, e não uma thread do sistema operacional. A demonstração usa uma **escala moderada**, para que a interface continue legível: 5 workers no fluxo normal e até cerca de 100 no script de escala. Os números abaixo servem de argumento de que a quantidade poderia ser muito maior.
 
-Medição feita na máquina de desenvolvimento, com processos ociosos (Elixir 1.20 / OTP 29):
+Medição de referência feita na máquina de desenvolvimento, com processos ociosos (Elixir 1.20 / OTP 29):
 
 | Processos | Tempo para criar | Memória total |
 |---|---|---|
@@ -188,21 +190,23 @@ Medição feita na máquina de desenvolvimento, com processos ociosos (Elixir 1.
 
 Cada processo custa cerca de 2,7 KB. Uma thread do sistema operacional costuma reservar cerca de 1 MB de pilha, então 100 mil threads exigiriam algo na ordem de 100 GB só de pilha.
 
-**Configurações previstas para a demonstração:**
+**Script de escala (`mix run escala.exs`):** processa o mesmo lote de 100 pedidos, com 50 ms cada, usando 1, 10 e 100 workers. As quantidades podem ser passadas como argumento (`mix run escala.exs 1 10 50`). Resultado na máquina de desenvolvimento:
 
-| Modo | Workers | Objetivo |
-|---|---|---|
-| Padrão | 1.000 | Fluxo normal, fácil de acompanhar |
-| Escala | 100.000 | Mostrar que a quantidade não é um problema |
+| Workers | Tempo | Processos na BEAM | Memória |
+|---|---|---|---|
+| 1 | 6.186 ms | 75 | 47,7 MB |
+| 10 | 623 ms | 84 | 47,8 MB |
+| 100 | 60 ms | 174 | 48,7 MB |
 
-Esses valores ainda serão ajustados na prática. O limite de 1 milhão de processos existe, mas custa 2,6 GB de memória e não acrescenta nada à demonstração.
+O tempo cai na proporção do número de workers, enquanto a memória quase não muda. Com 1 worker, o tempo fica acima dos 5.000 ms ideais porque, no Windows, o `Process.sleep` tem granularidade de cerca de 15 ms. O trabalho simulado é uma espera (`Process.sleep`), então o script demonstra concorrência, e não paralelismo de CPU.
 
 **Pontos de atenção:**
 
 - O Dispatcher entrega pedidos aos workers ociosos por uma fila; assim, não percorre a lista de workers a cada pedido.
 - O `DynamicSupervisor` está configurado com até 100 reinícios em 5 segundos para permitir a demonstração de falhas em sequência.
 - O limite de processos da BEAM é configurável (`+P`) e hoje está em cerca de 1 milhão.
-- O terminal apresenta os eventos recebidos por `Pedido.Resultados`. Em execuções de escala, a saída deve ser filtrada para não imprimir cada evento individualmente.
+- O Terminal só imprime eventos depois de `Pedido.Terminal.habilitar_saida/0`; até lá guarda no máximo 500. O script de escala não habilita a saída, para não imprimir cada evento.
+- `Pedido.Resultados.publicar/2` é assíncrona, para não bloquear o Dispatcher a cada evento.
 
 ## Tratamento de erros
 
@@ -233,7 +237,8 @@ As métricas são mantidas por `Pedido.Resultados` e incluídas no resumo ao fin
 - Pedidos inválidos.
 - Pedidos reprocessados.
 - Pedidos enviados à lista de falhas.
-- Reinícios de workers.
+- Reinícios de workers (workers removidos de propósito não contam).
+- Tempo de execução do último lote (`tempo_execucao_ms`), do primeiro pedido submetido até a fila esvaziar.
 
 ## Visualização (decisão em aberto)
 
@@ -266,7 +271,7 @@ Solução proposta: utilizar processos isolados, supervisão do OTP e monitorame
 
 ### Roteiro da demonstração
 
-1. **Concorrência e escala:** executar o mesmo lote com 1 worker, depois com 1.000 e depois com 100.000, comparando os tempos e mostrando a memória usada e a quantidade de processos (`:erlang.system_info(:process_count)`).
+1. **Concorrência e escala:** rodar `mix run escala.exs`, que executa o mesmo lote com 1, 10 e 100 workers e mostra o tempo, a memória usada e a quantidade de processos (`:erlang.system_info(:process_count)`).
 2. **Isolamento:** encerrar um worker (ou vários, escolhidos aleatoriamente) com `Process.exit(pid, :kill)` enquanto os outros continuam processando.
 3. **Recuperação:** mostrar o novo PID do worker e o reprocessamento do pedido interrompido.
 4. **Limite de tentativas:** enviar um pedido que sempre falha e mostrar sua chegada à lista de falhas.
@@ -291,11 +296,13 @@ A estrutura abaixo é uma previsão inicial e será ajustada conforme a implemen
 │   ├── dispatcher/      # Distribuição, monitoramento e reprocessamento
 │   ├── results/         # Métricas, estado e eventos compartilhados
 │   └── application.ex   # Inicialização da árvore de supervisão
+├── demo.exs             # Fluxo completo: validação, falhas e recuperação
+├── escala.exs           # Comparação de tempo com 1, 10 e 100 workers
 ├── mix.exs              # Configuração do projeto
 └── README.md
 ```
 
-> Para executar a demonstração da etapa atual: `mix run demo.exs`. O arquivo `src/main.ex` é um protótipo antigo (calculadora) sem relação com os pedidos.
+> Para executar: `mix run demo.exs` (fluxo completo) ou `mix run escala.exs` (comparação de escala).
 
 ## Roadmap
 
@@ -311,6 +318,9 @@ A estrutura abaixo é uma previsão inicial e será ajustada conforme a implemen
 - [x] Integrar o Dispatcher, monitoramento e reprocessamento.
 - [x] Manter métricas e eventos no processo de resultados.
 - [x] Usar os eventos compartilhados como saída do terminal.
+- [x] Manter a saída do terminal após reinícios da árvore.
+- [x] Medir o tempo de execução de cada lote.
+- [x] Criar o script de escala (1 contra N workers).
 
 ### Próximas etapas
 
