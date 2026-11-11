@@ -42,4 +42,19 @@ for %{entrada: entrada, motivo: motivo} <- invalidos do
   IO.puts("  ##{id}: #{motivo}")
 end
 
-:ok = Pedido.Dispatcher.processar(validos, 2)
+# Lote maior para os workers terem o que fazer: repete os validos com ids novos.
+lote =
+  for rodada <- 0..4, item <- validos do
+    %{item | pedido: %{item.pedido | id: item.pedido.id + rodada * 100}}
+  end
+
+IO.puts("\n== Despachando #{length(lote)} pedidos (workers: #{inspect(Pedido.WorkerSupervisor.ids())}) ==")
+Pedido.Dispatcher.submeter(lote)
+
+# Simula uma falha: derruba o worker 1 enquanto ele processa um pedido.
+Process.sleep(300)
+IO.puts("\n>>> Derrubando o worker 1 com Process.exit(pid, :kill)\n")
+Pedido.Worker.derrubar(1)
+
+{:ok, resumo} = Pedido.Dispatcher.aguardar()
+IO.puts("\n== Resumo ==\n#{inspect(resumo)}")

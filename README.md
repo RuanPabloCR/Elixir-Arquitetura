@@ -139,7 +139,7 @@ Pipeline de validação e transformação   <-- etapa atual
    +----+----+
    |    |    |
    v    v    v
-  W1   W2   W3
+  W1   W2  ...  WN
    |    |    |
    +----+----+
         |
@@ -156,15 +156,47 @@ Application
 └── Supervisor raiz (:rest_for_one)
     ├── Resultados
     ├── Dispatcher
-    └── Supervisor dos workers (:one_for_one)
+    └── DynamicSupervisor dos workers (:one_for_one)
         ├── Worker 1
         ├── Worker 2
-        └── Worker 3
+        ├── ...
+        └── Worker N   (N configurável, de dezenas a 100 mil)
 ```
 
 - Se um worker falhar, somente ele será reiniciado.
 - Se o Dispatcher falhar, ele e os workers serão reiniciados, preservando os Resultados.
 - Os processos mais simples e estáveis ficam no início da árvore.
+- Os workers ficam sob um `DynamicSupervisor`, e não sob um `Supervisor` com filhos fixos: a quantidade `N` é definida em tempo de execução e pode ser alterada durante a demonstração.
+
+### Escala dos workers
+
+Três workers não diferenciam o Elixir de linguagens mainstream, que também lidam bem com 3 threads. O que o projeto quer mostrar é que, na BEAM, um worker é um **processo leve**, e por isso o sistema pode ter milhares deles.
+
+Medição feita na máquina de desenvolvimento, com processos ociosos (Elixir 1.20 / OTP 29):
+
+| Processos | Tempo para criar | Memória total |
+|---|---|---|
+| 10 mil | 31 ms | 26 MB |
+| 100 mil | 545 ms | 262 MB |
+| 1 milhão | 5,8 s | 2,6 GB |
+
+Cada processo custa cerca de 2,7 KB. Uma thread do sistema operacional costuma reservar cerca de 1 MB de pilha, então 100 mil threads exigiriam algo na ordem de 100 GB só de pilha.
+
+**Configurações previstas para a demonstração:**
+
+| Modo | Workers | Objetivo |
+|---|---|---|
+| Padrão | 1.000 | Fluxo normal, fácil de acompanhar |
+| Escala | 100.000 | Mostrar que a quantidade não é um problema |
+
+Esses valores ainda serão ajustados na prática. O limite de 1 milhão de processos existe, mas custa 2,6 GB de memória e não acrescenta nada à demonstração.
+
+**Pontos de atenção:**
+
+- O Dispatcher atual escolhe o worker com `Enum.at(workers, i)`, que percorre a lista a cada pedido. Com muitos workers isso fica quadrático e precisa mudar (por exemplo, usar uma tupla ou escolher o próximo worker livre).
+- O `DynamicSupervisor` aceita por padrão 3 reinícios em 5 segundos e depois cai. Derrubar vários workers em sequência na demonstração exige aumentar o `max_restarts`.
+- O limite de processos da BEAM é configurável (`+P`) e hoje está em cerca de 1 milhão.
+- Os `IO.puts` dos workers precisam ser substituídos por eventos ou contadores. Com 100 mil workers, imprimir cada um inviabiliza a demonstração e a visualização.
 
 ## Tratamento de erros
 
@@ -231,8 +263,8 @@ Solução proposta: utilizar processos isolados, supervisão do OTP e monitorame
 
 ### Roteiro da demonstração
 
-1. **Concorrência e paralelismo:** executar o mesmo lote, com trabalho intensivo de CPU, usando 1 worker e depois vários, comparando os tempos.
-2. **Isolamento:** encerrar um worker com `Process.exit(pid, :kill)` enquanto os outros continuam processando.
+1. **Concorrência e escala:** executar o mesmo lote com 1 worker, depois com 1.000 e depois com 100.000, comparando os tempos e mostrando a memória usada e a quantidade de processos (`:erlang.system_info(:process_count)`).
+2. **Isolamento:** encerrar um worker (ou vários, escolhidos aleatoriamente) com `Process.exit(pid, :kill)` enquanto os outros continuam processando.
 3. **Recuperação:** mostrar o novo PID do worker e o reprocessamento do pedido interrompido.
 4. **Limite de tentativas:** enviar um pedido que sempre falha e mostrar sua chegada à lista de falhas.
 5. **Visualização:** exibir a árvore de supervisão e o estado dos workers (frontend ou `:observer.start()`).

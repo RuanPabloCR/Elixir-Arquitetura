@@ -11,6 +11,9 @@ defmodule Pedidos.MixProject do
   end
 
   def application do
-    [extra_applications: [:logger]]
+    [
+      mod: {Pedidos.Application, []},
+      extra_applications: [:logger]
+    ]
   end
 end
