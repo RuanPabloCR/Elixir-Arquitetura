@@ -9,7 +9,9 @@ defmodule Pedido.Worker do
 
   use GenServer
 
-  @tempo_processamento 1_000
+  # Tempo simulado de processamento de um pedido. Configuravel em tempo de
+  # execucao (`:tempo_processamento_ms`) para o script de escala usar lotes maiores.
+  @tempo_processamento_padrao 1_000
 
   @type id :: pos_integer()
   @type pedido_processado :: %{pedido: Pedido.t(), total: float()}
@@ -65,7 +67,7 @@ defmodule Pedido.Worker do
         falhas_simuladas: pedido.falhas_simuladas
     end
 
-    Process.sleep(@tempo_processamento)
+    Process.sleep(Application.get_env(:pedidos, :tempo_processamento_ms, @tempo_processamento_padrao))
     GenServer.cast(Pedido.Dispatcher, {:pedido_concluido, pedido.id, self()})
     {:noreply, state}
   end

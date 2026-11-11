@@ -21,16 +21,24 @@ defmodule Pedido.Resultados do
           invalidos: non_neg_integer(),
           reprocessados: non_neg_integer(),
           falhas: non_neg_integer(),
-          reinicios: non_neg_integer()
+          reinicios: non_neg_integer(),
+          tempo_execucao_ms: non_neg_integer() | nil
         }
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []),
     do: GenServer.start_link(__MODULE__, :ok, Keyword.put(opts, :name, __MODULE__))
 
-  @doc "Publica um evento, atualiza as metricas e notifica os assinantes."
+  @doc """
+  Publica um evento, atualiza as metricas e notifica os assinantes.
+
+  E assincrona para nao bloquear o Dispatcher a cada evento. A ordem continua
+  garantida: mensagens de um mesmo processo chegam na ordem em que foram
+  enviadas, entao uma consulta feita pelo Dispatcher depois de publicar ja ve o
+  evento.
+  """
   @spec publicar(atom(), map()) :: :ok
-  def publicar(tipo, dados \\ %{}), do: GenServer.call(__MODULE__, {:publicar, tipo, dados})
+  def publicar(tipo, dados \\ %{}), do: GenServer.cast(__MODULE__, {:publicar, tipo, dados})
 
   @doc "Registra os pedidos rejeitados pelo pipeline sem adicionar efeitos colaterais nele."
   @spec registrar_invalidos([map()]) :: :ok
@@ -55,29 +63,52 @@ defmodule Pedido.Resultados do
   def init(:ok) do
     {:ok,
      %{
-       metricas: %{processados: 0, invalidos: 0, reprocessados: 0, falhas: 0, reinicios: 0},
+       metricas: %{
+         processados: 0,
+         invalidos: 0,
+         reprocessados: 0,
+         falhas: 0,
+         reinicios: 0,
+         tempo_execucao_ms: nil
+       },
        eventos: :queue.new(),
        sequencia: 0,
        assinantes: %{},
        workers: %{},
        workers_vistos: MapSet.new(),
+       # ref do monitor => id do worker
+       workers_monitorados: %{},
        pedidos_falhos: []
      }}
   end
 
   @impl true
-  def handle_call({:publicar, :worker_pronto, %{worker_id: id} = dados}, _from, state) do
+  def handle_cast({:publicar, :worker_pronto, %{worker_id: id, pid: pid} = dados}, state) do
     tipo =
       if MapSet.member?(state.workers_vistos, id), do: :worker_reiniciado, else: :worker_iniciado
 
-    state = %{state | workers_vistos: MapSet.put(state.workers_vistos, id)}
-    {:reply, :ok, registrar_evento(state, tipo, dados)}
+    # Monitora o worker por conta propria: se o Dispatcher estiver fora do ar
+    # quando o worker sair, ninguem publicaria a saida.
+    state = %{
+      state
+      | workers_vistos: MapSet.put(state.workers_vistos, id),
+        workers_monitorados: Map.put(state.workers_monitorados, Process.monitor(pid), id)
+    }
+
+    {:noreply, registrar_evento(state, tipo, dados)}
   end
 
-  def handle_call({:publicar, tipo, dados}, _from, state) do
-    {:reply, :ok, registrar_evento(state, tipo, dados)}
+  # Um id removido que volte depois e um worker novo, nao um reinicio.
+  def handle_cast({:publicar, :worker_removido, %{worker_id: id} = dados}, state) do
+    state = %{state | workers_vistos: MapSet.delete(state.workers_vistos, id)}
+    {:noreply, registrar_evento(state, :worker_removido, dados)}
   end
 
+  def handle_cast({:publicar, tipo, dados}, state) do
+    {:noreply, registrar_evento(state, tipo, dados)}
+  end
+
+  @impl true
   def handle_call({:registrar_invalidos, invalidos}, _from, state) do
     state =
       Enum.reduce(invalidos, state, fn %{entrada: entrada, motivo: motivo}, acc ->
@@ -102,6 +133,27 @@ defmodule Pedido.Resultados do
   def handle_call(:estado, _from, state), do: {:reply, snapshot(state), state}
 
   @impl true
+  def handle_info({:DOWN, ref, :process, pid, _reason}, %{workers_monitorados: monitorados} = state)
+      when is_map_key(monitorados, ref) do
+    {id, monitorados} = Map.pop(monitorados, ref)
+
+    # Um worker que cai costuma voltar em microssegundos. Espera um pouco antes de
+    # tira-lo do estado, para a tela nao piscar a cada reinicio.
+    Process.send_after(self(), {:verificar_worker, id, pid}, 500)
+    {:noreply, %{state | workers_monitorados: monitorados}}
+  end
+
+  def handle_info({:verificar_worker, id, pid}, state) do
+    case state.workers do
+      %{^id => %{pid: ^pid}} ->
+        state = %{state | workers_vistos: MapSet.delete(state.workers_vistos, id)}
+        {:noreply, registrar_evento(state, :worker_removido, %{worker_id: id, pid: pid})}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
   def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
     assinantes =
       case state.assinantes do
@@ -166,6 +218,9 @@ defmodule Pedido.Resultados do
   end
 
   defp atualizar_metricas(state, :worker_reiniciado, _dados), do: incrementar(state, :reinicios)
+
+  defp atualizar_metricas(state, :lote_concluido, %{duracao_ms: duracao}),
+    do: put_in(state, [:metricas, :tempo_execucao_ms], duracao)
   defp atualizar_metricas(state, _tipo, _dados), do: state
 
   defp incrementar(state, chave) do
@@ -176,6 +231,10 @@ defmodule Pedido.Resultados do
        when tipo in [:worker_iniciado, :worker_reiniciado] do
     worker = %{id: id, pid: dados.pid, estado: :ocioso, pedido_id: nil}
     put_in(state, [:workers, id], worker)
+  end
+
+  defp atualizar_workers(state, :worker_removido, %{worker_id: id}) do
+    Map.update!(state, :workers, &Map.delete(&1, id))
   end
 
   defp atualizar_workers(state, :worker_falhou, %{worker_id: id}) do
