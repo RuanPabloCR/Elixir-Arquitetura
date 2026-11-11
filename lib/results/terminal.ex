@@ -57,49 +57,51 @@ defmodule Pedido.Terminal do
     {:noreply, state}
   end
 
-  defp formatar(%{tipo: :worker_iniciado, dados: dados}) do
+  @doc "Texto de um evento. Tambem usado pelo painel web."
+  @spec formatar(Pedido.Resultados.evento()) :: String.t()
+  def formatar(%{tipo: :worker_iniciado, dados: dados}) do
     "[Evento] Worker #{dados.worker_id} iniciado (#{inspect(dados.pid)})"
   end
 
-  defp formatar(%{tipo: :worker_reiniciado, dados: dados}) do
+  def formatar(%{tipo: :worker_reiniciado, dados: dados}) do
     "[Evento] Worker #{dados.worker_id} reiniciado (#{inspect(dados.pid)})"
   end
 
-  defp formatar(%{tipo: :worker_falhou, dados: dados}) do
+  def formatar(%{tipo: :worker_falhou, dados: dados}) do
     "[Evento] Worker #{dados.worker_id} falhou: #{dados.motivo}"
   end
 
-  defp formatar(%{tipo: :pedido_iniciado, dados: dados}) do
+  def formatar(%{tipo: :pedido_iniciado, dados: dados}) do
     "[Evento] Worker #{dados.worker_id} iniciou o pedido ##{dados.pedido_id}"
   end
 
-  defp formatar(%{tipo: :pedido_concluido, dados: dados}) do
+  def formatar(%{tipo: :pedido_concluido, dados: dados}) do
     "[Evento] Pedido ##{dados.pedido_id} concluido pelo worker #{dados.worker_id}"
   end
 
-  defp formatar(%{tipo: :pedido_reprocessado, dados: dados}) do
+  def formatar(%{tipo: :pedido_reprocessado, dados: dados}) do
     "[Evento] Pedido ##{dados.pedido_id} reenfileirado (tentativa #{dados.tentativas})"
   end
 
-  defp formatar(%{tipo: :pedido_falhou, dados: dados}) do
+  def formatar(%{tipo: :pedido_falhou, dados: dados}) do
     "[Evento] Pedido ##{dados.pedido_id} enviado para falhas: #{dados.motivo}"
   end
 
-  defp formatar(%{tipo: :pedido_invalido, dados: dados}) do
+  def formatar(%{tipo: :pedido_invalido, dados: dados}) do
     "[Evento] Pedido invalido #{inspect(dados.pedido_id)}: #{dados.motivo}"
   end
 
-  defp formatar(%{tipo: :worker_removido, dados: dados}) do
+  def formatar(%{tipo: :worker_removido, dados: dados}) do
     "[Evento] Worker #{dados.worker_id} removido"
   end
 
-  defp formatar(%{tipo: :lote_iniciado, dados: dados}) do
+  def formatar(%{tipo: :lote_iniciado, dados: dados}) do
     "[Evento] Lote iniciado com #{dados.pedidos} pedidos"
   end
 
-  defp formatar(%{tipo: :lote_concluido, dados: dados}) do
+  def formatar(%{tipo: :lote_concluido, dados: dados}) do
     "[Evento] Lote concluido em #{dados.duracao_ms} ms"
   end
 
-  defp formatar(%{tipo: tipo, dados: dados}), do: "[Evento] #{tipo}: #{inspect(dados)}"
+  def formatar(%{tipo: tipo, dados: dados}), do: "[Evento] #{tipo}: #{inspect(dados)}"
 end

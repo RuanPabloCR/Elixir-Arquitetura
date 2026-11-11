@@ -76,16 +76,25 @@ defmodule Pedido.Resultados do
        assinantes: %{},
        workers: %{},
        workers_vistos: MapSet.new(),
+       # ref do monitor => id do worker
+       workers_monitorados: %{},
        pedidos_falhos: []
      }}
   end
 
   @impl true
-  def handle_cast({:publicar, :worker_pronto, %{worker_id: id} = dados}, state) do
+  def handle_cast({:publicar, :worker_pronto, %{worker_id: id, pid: pid} = dados}, state) do
     tipo =
       if MapSet.member?(state.workers_vistos, id), do: :worker_reiniciado, else: :worker_iniciado
 
-    state = %{state | workers_vistos: MapSet.put(state.workers_vistos, id)}
+    # Monitora o worker por conta propria: se o Dispatcher estiver fora do ar
+    # quando o worker sair, ninguem publicaria a saida.
+    state = %{
+      state
+      | workers_vistos: MapSet.put(state.workers_vistos, id),
+        workers_monitorados: Map.put(state.workers_monitorados, Process.monitor(pid), id)
+    }
+
     {:noreply, registrar_evento(state, tipo, dados)}
   end
 
@@ -124,6 +133,27 @@ defmodule Pedido.Resultados do
   def handle_call(:estado, _from, state), do: {:reply, snapshot(state), state}
 
   @impl true
+  def handle_info({:DOWN, ref, :process, pid, _reason}, %{workers_monitorados: monitorados} = state)
+      when is_map_key(monitorados, ref) do
+    {id, monitorados} = Map.pop(monitorados, ref)
+
+    # Um worker que cai costuma voltar em microssegundos. Espera um pouco antes de
+    # tira-lo do estado, para a tela nao piscar a cada reinicio.
+    Process.send_after(self(), {:verificar_worker, id, pid}, 500)
+    {:noreply, %{state | workers_monitorados: monitorados}}
+  end
+
+  def handle_info({:verificar_worker, id, pid}, state) do
+    case state.workers do
+      %{^id => %{pid: ^pid}} ->
+        state = %{state | workers_vistos: MapSet.delete(state.workers_vistos, id)}
+        {:noreply, registrar_evento(state, :worker_removido, %{worker_id: id, pid: pid})}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
   def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
     assinantes =
       case state.assinantes do

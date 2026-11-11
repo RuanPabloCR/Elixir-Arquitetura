@@ -10,7 +10,16 @@ A proposta é desenvolver um sistema de processamento de pedidos capaz de recebe
 
 Além de demonstrar o funcionamento da linguagem, o projeto busca evidenciar como Elixir e seu ecossistema, baseado na máquina virtual BEAM e no OTP, abordam problemas de concorrência, isolamento de falhas e recuperação de processos.
 
-**Status:** A etapa atual cobre representação, validação, workers concorrentes, supervisão, reprocessamento e métricas. A interface visual permanece para uma próxima etapa.
+**Status:** O sistema cobre representação, validação, workers concorrentes, supervisão, reprocessamento, métricas e um painel web em Phoenix LiveView para a demonstração.
+
+## Como executar
+
+```bash
+mix deps.get
+mix phx.server        # painel em http://localhost:4000
+mix run demo.exs      # fluxo completo no terminal
+mix run escala.exs    # comparação de tempo com 1, 10 e 100 workers
+```
 
 ## Objetivos
 
@@ -24,7 +33,7 @@ Além de demonstrar o funcionamento da linguagem, o projeto busca evidenciar com
 
 ## Escopo da etapa atual
 
-Nesta etapa, o sistema valida pedidos, distribui os válidos entre workers supervisionados e registra resultados e eventos. A interface visual ainda não faz parte do projeto; o processo de resultados já oferece métricas e eventos para ela consumir futuramente.
+O sistema valida pedidos, distribui os válidos entre workers supervisionados e registra resultados e eventos. Um painel web consome esses eventos para mostrar a execução e permite controlar a demonstração.
 
 ### O que será entregue
 
@@ -33,12 +42,12 @@ Nesta etapa, o sistema valida pedidos, distribui os válidos entre workers super
 3. **Validação:** funções que verificam um pedido e retornam `{:ok, pedido}` ou `{:error, motivo}`.
 4. **Pipeline funcional:** recebe uma coleção de pedidos e a separa em válidos e inválidos.
 5. **Concorrência e recuperação:** workers supervisionados processam os pedidos; falhas podem causar reprocessamento até o limite configurado.
-6. **Resultados e eventos:** um processo mantém métricas, estado dos workers e eventos recentes, compartilhados com consumidores como o terminal e uma futura interface.
+6. **Resultados e eventos:** um processo mantém métricas, estado dos workers e eventos recentes, compartilhados com consumidores como o terminal e o painel web.
+7. **Painel web:** Phoenix LiveView mostrando workers, métricas e eventos ao vivo, com controles para enviar pedidos, mudar a quantidade de workers e simular falhas.
 
-### Fora do escopo desta etapa
+### Fora do escopo
 
 - Testes automatizados: por se tratar de um projeto de apresentação, o escopo foi reduzido e a verificação é feita executando o programa de demonstração.
-- Interface visual.
 
 ### Representação dos pedidos
 
@@ -121,9 +130,9 @@ Conceitos explorados: OTP, `GenServer` e `Supervisor`, árvore de supervisão, e
 
 `Pedido.Resultados` mantém contadores, estado dos workers e os 2.000 eventos mais recentes. Consumidores assinam eventos ou consultam um snapshot; o terminal já apresenta os mesmos eventos que poderão alimentar a interface.
 
-### 6. Visualização da execução
+### 6. Visualização da execução *(etapa atual)*
 
-Uma interface para acompanhar o sistema em funcionamento: workers ativos, pedidos em andamento, e controles para ajustar a quantidade de workers e simular falhas. Veja [Visualização](#visualização-decisão-em-aberto).
+Painel em Phoenix LiveView para acompanhar o sistema em funcionamento: workers ativos, pedidos em andamento, e controles para ajustar a quantidade de workers e simular falhas. Veja [Painel web](#painel-web-phoenix-liveview).
 
 ## Arquitetura proposta
 
@@ -159,20 +168,24 @@ O Supervisor não participa do fluxo de dados: ele inicia, observa e reinicia pr
 
 ```text
 Application
-└── Supervisor raiz (:rest_for_one)
-    ├── Registry            (nome -> PID atual de cada worker)
-    ├── Resultados          (métricas e eventos)
-    ├── Dispatcher
-    ├── DynamicSupervisor dos workers (:one_for_one)
-    │   ├── Worker 1
-    │   ├── ...
-    │   └── Worker N        (5 por padrão; ajustável em tempo de execução)
-    ├── Terminal            (imprime os eventos)
-    └── workers_iniciais    (inicia os N workers na subida e não fica vivo)
+└── Supervisor raiz (:one_for_one)
+    ├── Pedidos.Nucleo (:rest_for_one)
+    │   ├── Registry            (nome -> PID atual de cada worker)
+    │   ├── Resultados          (métricas e eventos)
+    │   ├── Dispatcher
+    │   ├── DynamicSupervisor dos workers (:one_for_one)
+    │   │   ├── Worker 1
+    │   │   ├── ...
+    │   │   └── Worker N        (5 por padrão; ajustável em tempo de execução)
+    │   ├── Terminal            (imprime os eventos)
+    │   └── workers_iniciais    (inicia os N workers na subida e não fica vivo)
+    ├── PubSub                  (Phoenix)
+    └── Endpoint                (painel web)
 ```
 
 - Se um worker falhar, somente ele será reiniciado.
-- Se o Dispatcher falhar, ele, os workers e o Terminal serão reiniciados, preservando os Resultados. Os workers iniciais são recriados e se anunciam ao novo Dispatcher.
+- Se o Dispatcher falhar, ele, os workers e o Terminal serão reiniciados, preservando os Resultados. Os workers iniciais são recriados e se anunciam ao novo Dispatcher; workers adicionados depois não voltam.
+- O painel web fica em um ramo separado do núcleo: derrubar o Dispatcher na demonstração não desconecta o painel.
 - Os processos mais simples e estáveis ficam no início da árvore.
 - Os workers ficam sob um `DynamicSupervisor`, e não sob um `Supervisor` com filhos fixos: a quantidade `N` é definida em tempo de execução (`Pedido.WorkerSupervisor.definir_quantidade/1`) e pode ser alterada durante a demonstração.
 
@@ -194,9 +207,11 @@ Cada processo custa cerca de 2,7 KB. Uma thread do sistema operacional costuma r
 
 | Workers | Tempo | Processos na BEAM | Memória |
 |---|---|---|---|
-| 1 | 6.186 ms | 75 | 47,7 MB |
-| 10 | 623 ms | 84 | 47,8 MB |
-| 100 | 60 ms | 174 | 48,7 MB |
+| 1 | 6.199 ms | 182 | 51,7 MB |
+| 10 | 616 ms | 191 | 51,6 MB |
+| 100 | 59 ms | 281 | 52,4 MB |
+
+Os cerca de 180 processos da primeira linha já existem antes dos workers: são da própria BEAM, do Phoenix e do núcleo.
 
 O tempo cai na proporção do número de workers, enquanto a memória quase não muda. Com 1 worker, o tempo fica acima dos 5.000 ms ideais porque, no Windows, o `Process.sleep` tem granularidade de cerca de 15 ms. O trabalho simulado é uma espera (`Process.sleep`), então o script demonstra concorrência, e não paralelismo de CPU.
 
@@ -207,6 +222,7 @@ O tempo cai na proporção do número de workers, enquanto a memória quase não
 - O limite de processos da BEAM é configurável (`+P`) e hoje está em cerca de 1 milhão.
 - O Terminal só imprime eventos depois de `Pedido.Terminal.habilitar_saida/0`; até lá guarda no máximo 500. O script de escala não habilita a saída, para não imprimir cada evento.
 - `Pedido.Resultados.publicar/2` é assíncrona, para não bloquear o Dispatcher a cada evento.
+- `Pedido.Resultados` monitora os workers por conta própria: se o Dispatcher estiver fora do ar quando um worker sair, o estado mostrado no painel continua correto.
 
 ## Tratamento de erros
 
@@ -240,20 +256,19 @@ As métricas são mantidas por `Pedido.Resultados` e incluídas no resumo ao fin
 - Reinícios de workers (workers removidos de propósito não contam).
 - Tempo de execução do último lote (`tempo_execucao_ms`), do primeiro pedido submetido até a fila esvaziar.
 
-## Visualização (decisão em aberto)
+## Painel web (Phoenix LiveView)
 
-Queremos um pequeno frontend somente visual para a demonstração: acompanhar workers, pedidos, eventos e métricas. A lógica de processamento continua no núcleo Elixir; a tela consulta o estado e assina os eventos de `Pedido.Resultados`, sem implementar regras de negócio.
+`mix phx.server` sobe o painel em http://localhost:4000. Ele é somente uma camada de visualização: não tem regra de negócio, assina os eventos de `Pedido.Resultados` e chama as mesmas funções que se usaria no `iex`.
 
-| Opção | Linguagem | Prós | Contras |
-|---|---|---|---|
-| **Phoenix LiveView** | Elixir (sem JavaScript escrito por nós) | Continua 100% Elixir; a tela acompanha eventos e estado em tempo real | Adiciona a dependência do Phoenix e mais conceitos para explicar |
-| **Plug + Cowboy com SSE/WebSocket e página HTML estática** | Elixir + HTML/JS simples | Dependências mínimas; o servidor continua em Elixir | A página precisa de algum JavaScript; mais código manual |
-| **Dashboard no terminal** (`IO.ANSI` ou biblioteca TUI) | Elixir puro | Sem dependências web | Menos atrativo para a apresentação |
-| **`:observer.start()`** | Ferramenta da própria BEAM | Já mostra a árvore de supervisão e os PIDs, sem código | Não permite controlar a simulação |
+**O que mostra:** as métricas (processados, inválidos, reprocessados, falhas, reinícios, fila e tempo do último lote), um cartão por worker com seu estado, pedido atual, PID e quantidade de reinícios, a lista de falhas e os eventos recentes. Um worker que cai fica destacado em vermelho por 2 segundos, já com o novo PID.
 
-**Inclinação atual:** manter o núcleo (pedidos, workers, supervisão e resultados) em Elixir puro e independente da interface, e adicionar o **Phoenix LiveView** depois como camada de visualização. Assim a lógica não depende do frontend, e o `:observer` serve de reserva para a demonstração.
+**Controles:** enviar um lote de pedidos, um pedido que falha uma vez, um que sempre falha e pedidos inválidos; adicionar, remover ou definir a quantidade de workers (até 200); mudar o tempo de processamento por pedido; derrubar um worker específico ou o Dispatcher.
 
-Esta decisão **não bloqueia a etapa atual**, que não possui interface.
+**Por que LiveView:** o painel continua 100% Elixir. O estado é mantido no servidor, e o navegador recebe só as diferenças pelo WebSocket. Não há Node nem esbuild: o JavaScript do Phoenix e do LiveView é servido direto dos pacotes, e o CSS e o JS do painel ficam em `priv/static`.
+
+**Atualização:** a cada rajada de eventos, o painel relê o estado no máximo a cada 100 ms, para não redesenhar a tela a cada evento quando há muitos workers.
+
+O `:observer.start()` continua disponível como reserva para mostrar a árvore de supervisão.
 
 ## Live Cases
 
@@ -275,14 +290,14 @@ Solução proposta: utilizar processos isolados, supervisão do OTP e monitorame
 2. **Isolamento:** encerrar um worker (ou vários, escolhidos aleatoriamente) com `Process.exit(pid, :kill)` enquanto os outros continuam processando.
 3. **Recuperação:** mostrar o novo PID do worker e o reprocessamento do pedido interrompido.
 4. **Limite de tentativas:** enviar um pedido que sempre falha e mostrar sua chegada à lista de falhas.
-5. **Visualização:** exibir a árvore de supervisão e o estado dos workers (frontend ou `:observer.start()`).
+5. **Visualização:** conduzir os passos 2 a 4 pelo painel (`mix phx.server`); o `:observer.start()` mostra a árvore de supervisão.
 
 ## Tecnologias
 
 - **Elixir** — linguagem principal.
 - **BEAM** — máquina virtual de execução.
 - **OTP** — abstrações para concorrência, supervisão e construção de sistemas tolerantes a falhas.
-- **Phoenix LiveView** — visualização (a confirmar).
+- **Phoenix LiveView** e **Bandit** — painel web da demonstração.
 
 ## Estrutura planejada
 
@@ -295,14 +310,17 @@ A estrutura abaixo é uma previsão inicial e será ajustada conforme a implemen
 │   ├── workers/         # Workers, falhas simuladas e DynamicSupervisor
 │   ├── dispatcher/      # Distribuição, monitoramento e reprocessamento
 │   ├── results/         # Métricas, estado e eventos compartilhados
+│   ├── web/             # Painel: Endpoint, Router, layout e LiveView
 │   └── application.ex   # Inicialização da árvore de supervisão
+├── priv/static/         # CSS e JS do painel
+├── config/config.exs    # Configuração do Endpoint
 ├── demo.exs             # Fluxo completo: validação, falhas e recuperação
 ├── escala.exs           # Comparação de tempo com 1, 10 e 100 workers
 ├── mix.exs              # Configuração do projeto
 └── README.md
 ```
 
-> Para executar: `mix run demo.exs` (fluxo completo) ou `mix run escala.exs` (comparação de escala).
+> Para executar, veja [Como executar](#como-executar).
 
 ## Roadmap
 
@@ -321,10 +339,10 @@ A estrutura abaixo é uma previsão inicial e será ajustada conforme a implemen
 - [x] Manter a saída do terminal após reinícios da árvore.
 - [x] Medir o tempo de execução de cada lote.
 - [x] Criar o script de escala (1 contra N workers).
+- [x] Implementar o painel web com Phoenix LiveView.
 
 ### Próximas etapas
 
-- [ ] Decidir e implementar a visualização (Elixir puro ou LiveView).
 - [ ] Preparar e ensaiar a demonstração prática.
 
 ## Contexto acadêmico
