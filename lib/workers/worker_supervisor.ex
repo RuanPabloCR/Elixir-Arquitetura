@@ -21,6 +21,40 @@ defmodule Pedido.WorkerSupervisor do
     Enum.each(1..quantidade, &iniciar_worker/1)
   end
 
+  @doc """
+  Child spec que inicia os workers iniciais de forma sincrona, durante a subida
+  da arvore. Retorna `:ignore`, porque nao deixa nenhum processo vivo; por ser
+  `:transient`, roda de novo quando o `:rest_for_one` reinicia a arvore.
+  """
+  @spec workers_iniciais(pos_integer()) :: Supervisor.child_spec()
+  def workers_iniciais(quantidade) do
+    %{
+      id: :workers_iniciais,
+      start: {__MODULE__, :iniciar_e_ignorar, [quantidade]},
+      restart: :transient
+    }
+  end
+
+  @doc false
+  def iniciar_e_ignorar(quantidade) do
+    iniciar(quantidade)
+    :ignore
+  end
+
+  @doc "Adiciona ou remove workers ate restarem exatamente `quantidade`."
+  @spec definir_quantidade(non_neg_integer()) :: :ok
+  def definir_quantidade(quantidade) when is_integer(quantidade) and quantidade >= 0 do
+    atual = length(ids())
+
+    cond do
+      atual < quantidade -> Enum.each(1..(quantidade - atual), fn _ -> adicionar_worker() end)
+      atual > quantidade -> Enum.each(1..(atual - quantidade), fn _ -> remover_worker() end)
+      true -> :ok
+    end
+
+    :ok
+  end
+
   @spec iniciar_worker(Pedido.Worker.id()) :: DynamicSupervisor.on_start_child()
   def iniciar_worker(id), do: DynamicSupervisor.start_child(__MODULE__, {Pedido.Worker, id})
 
